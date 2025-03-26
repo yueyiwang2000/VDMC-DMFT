@@ -1,0 +1,76 @@
+This is the repository for the VDMC_DMFT code: arXiv.2503.11440
+The dataset is uploaded at: https://zenodo.org/records/15086182
+
+for any questions, please contact me at yw975@physics.rutgers.edu
+
+environment requirements:
+python
+numpy
+scipy
+matplotlib
+mpi4py
+numba
+
+structure of the code(when you download all data and source codes they thould look like this):
+project_root/
+│── src/                      # source code
+    ├──DMFT_CT.py             # calculate DMFT counter terms
+    ├──pert_DMFT_PM.py        # main code of doing perturbation
+    ├──pert_DMFT_PM_energy.py # calculation and plotting of magnetization and total energy, specific heat
+    ├──pert_DMFT_PM_B.py      # code of doing perturbation under a small magnetic field.
+    ├──XAF.py                 # calculate susceptibility
+    ├──DMFT/                  # This folder may contains something useful if you want to run your own DMFT
+    ├──diagramsMC/            # some functions about doing Monte Carlo    
+    ...(other libraries)
+│── data/                     # data
+    ├── files_ctqmc/          # DMFT data from CT-QMC impurity solver
+    ├── files_boldc/          # DMFT data from bold-CTQMC impurity solver
+    ├── files_boldcB/         # DMFT data from bold-CTQMC impurity solver, under a small magnetic field (to calculate the X_AF)
+    ├── Sigma_disp1/          # self-energy calculated from perturbation
+    ├── Sigma_dispB/          # self-energy calculated from perturbation, under a small magnetic field (to calculate the X_AF)
+    ├── Sigma_imp/            # DMFT counter terms in perturbation
+│── .gitignore      
+│── README.md 
+
+
+
+How to run the code:
+
+if you want to start from the scratch, start from step 1;
+if you want to use my DMFT data and do the perturbation, start from step 2.
+if you want to take all my data and check detailed results, start from step 4. (strongly recommended)
+
+
+1.This code requires Dynamical Mean Field Theory (DMFT) data. To get DMFT data, you can:
+    1. Use my DMFT data uploaded in zenodo: https://zenodo.org/records/15086182. (strongly recommended)
+    2. Use the DMFT package from:  http://hauleweb.rutgers.edu/tutorials/index.html and use its CT-QMC impurity solver to generate the DMFT data.
+    3. Use your favorite DMFT code (if you have one) to generate the DMFT data.
+
+
+2. after doing DMFT, First we have to prepare the DMFT counter terms.
+run the function gen_allCTs in DMFT_CT.py to get the DMFT counter term it will be saved in the folder 'Sigma_imp'.
+Note: DMFT counter terms are alpha-independent. 
+
+
+3. To do the perturbation at given U, T, and given several alphas, use launch_UT(U,T,maxorder) in src/pert_DMFT_PM.py.
+maxorder=3 will be very fast, but maxorder=4 takes much longer time since Monte Carlo sampling is used (which is not very efficient...).
+it will read the DMFT counter term and do the perturbation, and save the self-energy through several coefficients.
+
+
+4. After the perturbation is done, to get the magnetization and total energy for specific U and Tunder different variational parameters and orders:
+run mag_test() or energy_test() in src/pert_DMFT_energy.py
+it will read stored data and calculate the total energy and magnetization and plot it.
+
+
+5. To get the total energy/CV curve: run energy_fastconv(8.0,1,1) in if __name__ == "__main__": of src/pert_DMFT_energy.py
+Cv is hard to calculate since it's derivative of energy, which will bring a lot of noise.
+
+6. To get the antiferromagnetic susceptibility: 
+    1. run search_optalp(U,T,B,3) in if __name__ == "__main__": of src/pert_DMFT_PM_B.py to generate data under magnetic field.
+    2.run X_VDMCAF(10.0) in if __name__ == "__main__": of src/XAF.py to calculate the susceptibility.
+
+7. To see the spectra: It's easy to have spectra once you have the self-energies. But you need to use analytical continuation to get the spectra.
+
+
+
+

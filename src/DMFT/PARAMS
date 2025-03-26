@@ -1,0 +1,15 @@
+# Input file for continuous time quantum Monte Carlo
+exe mpirun --mca pml ob1 --mca btl tcp,self -np 2 ./ctqmc 	 # Path to executable
+U 6.0 	 # Coulomb repulsion (F0)
+mu 3.0 	 # Chemical potential
+beta 3.4482758620689657 	 # Inverse temperature
+M 20000000.0 	 # Number of Monte Carlo steps
+mode SH 	 # S stands for self-energy sampling, M stands for high frequency moment tail
+cix one_band.imp 	 # Input file with atomic state
+Delta ../cache_ctqmc/Delta.inp 	 # Input bath function hybridization
+tsample 200 	 # how often to record the measurements
+nom 80 	 # number of Matsubara frequency points to sample
+svd_lmax 30 	 # number of SVD functions to project the solution
+aom 1 	 # number of frequency points to determin high frequency tail
+GlobalFlip 1000000 	 # how often to perform global flip
+fastFilesystem 1 	 #to produce Delta.tau

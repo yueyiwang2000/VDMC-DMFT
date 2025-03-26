@@ -1,0 +1,3 @@
+these 3 files in the backup2 folder aims to use the updated corrected k-space basis.
+However things are not done since all diagonal results are s times of expected, where s is the symmetry factor of the system.
+and, seems the quality of off-diagonal ones are also not so good.
