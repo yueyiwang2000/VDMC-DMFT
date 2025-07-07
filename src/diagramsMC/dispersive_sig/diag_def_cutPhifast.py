@@ -139,6 +139,7 @@ class FuncNDiagNew:
     
     """
     def __init__(self,T,U,knum,taunum,nfreq,norder,ut,kbasis,perm,GFs,dependence,symfactor):
+        ifctqmc=1
         # orders and dimensions
         self.norder=norder
         self.symfactor=symfactor
@@ -165,16 +166,21 @@ class FuncNDiagNew:
         self.diag_coefficient=(-1)**nloopssig*(-self.U)**(self.norder)/self.knum**(3*(self.Ndimk-1))*(self.beta/self.taunum)**(self.Ndimtau-1)
 
         #configuration space maybe we don't need the 4 below?
-        self.t=np.zeros(self.nGf,dtype=int)
-        self.ttemp=np.zeros(self.nGf,dtype=int)
-        # self.k=np.zeros((self.Ndimk,3),dtype=int)
-        # self.ktemp=np.zeros((self.Ndimk,3),dtype=int)
-        # t, k for each GF,
-        self.tslice=np.zeros(self.nGf,dtype=int)
-        self.tslicetemp=np.zeros(self.nGf,dtype=int)
+
+        if ifctqmc==0:
+            self.t=np.zeros(self.nGf,dtype=int)
+            self.ttemp=np.zeros(self.nGf,dtype=int)
+            self.tslice=np.zeros(self.nGf,dtype=int)
+            self.tslicetemp=np.zeros(self.nGf,dtype=int)
+        else:
+            self.t=np.zeros(self.nGf,dtype=float)
+            self.ttemp=np.zeros(self.nGf,dtype=float)
+            self.tslice=np.zeros(self.nGf,dtype=float)
+            self.tslicetemp=np.zeros(self.nGf,dtype=float)
+
         self.tsign=np.zeros(self.nGf,dtype=int)
         self.tsign_temp=np.zeros(self.nGf,dtype=int)     
-
+        self.tsignlist_ctqmc=np.array([-1,1,-1])
         self.kslice=np.zeros((self.nGf,3),dtype=int)
         self.kslicetemp=np.zeros((self.nGf,3),dtype=int)
         self.ksign=np.zeros(self.nGf,dtype=int)
@@ -228,9 +234,9 @@ class FuncNDiagNew:
         ori_grid=(np.arange(nfreq*2)+0.5)/(nfreq*2)
         simp_grid=np.arange(taunum+1)/taunum
         # we do splining for all G11 G12 G22 first. then even we change sublatind we dont have to spline again.
-        self.interpolator11=interp1d(ori_grid, GFs[0], kind='linear', axis=0, fill_value='extrapolate')
-        self.interpolator12=interp1d(ori_grid, GFs[1], kind='linear', axis=0, fill_value='extrapolate')
-        self.interpolator22=interp1d(ori_grid, GFs[2], kind='linear', axis=0, fill_value='extrapolate')
+        self.interpolator11=interp1d(ori_grid, GFs[0],  axis=0, fill_value='extrapolate')
+        self.interpolator12=interp1d(ori_grid, GFs[1],  axis=0, fill_value='extrapolate')
+        self.interpolator22=interp1d(ori_grid, GFs[2],  axis=0, fill_value='extrapolate')
         G11=self.interpolator11(simp_grid)
         G12=self.interpolator12(simp_grid)
         G22=self.interpolator22(simp_grid)
@@ -240,7 +246,11 @@ class FuncNDiagNew:
             3: G12,
             4: G22,
         }
-
+        self.GF_spline_dict={
+            2: interp1d(ori_grid*self.beta, GFs[0],  axis=0, fill_value='extrapolate'),
+            3: interp1d(ori_grid*self.beta, GFs[1],  axis=0, fill_value='extrapolate'),
+            4: interp1d(ori_grid*self.beta, GFs[2],  axis=0, fill_value='extrapolate'),
+        }
         #time
         self.time_k=0.
         self.time_tau=0.
@@ -264,11 +274,13 @@ class FuncNDiagNew:
         #     self.slicedG[i]=Gshift(self.GF[self.Gind[i]],ki,taui,self.ksym_array[i],self.knum,self.taunum,self.taulimit[i])
 
 
-    def update(self,new_momentum,new_imagtime,newsublatindshort,i_coeff,l):
+    def update(self,new_momentum,new_imagtime,newsublatindshort,i_coeff,l,ifctqmc=0):
         '''
         the idea of this update function is to re-evaluate everything so we have everything correct in the beginning.
         it could be slow, since we won't use it frequently.
         This can also be considered as initialization.
+
+        this is the bottleneck of the code. This is the old version and there should be a new version in the class.
         '''
         newsublatind=gen_sublatint_full(newsublatindshort)
         self.SubLatInd=newsublatind
@@ -286,10 +298,6 @@ class FuncNDiagNew:
             self.ksign[i]=self.ksignlist[np.sum(kraw//self.knum)]
             self.tsign[i]=self.tsignlist[self.taulimit[i],self.t[i]+self.taunum]
             self.slicedG[i]=self.GF[self.Gind[i]][self.tslice[i],self.kslice[i,0],self.kslice[i,1],self.kslice[i,2]]*self.tsign[i]
-
-
-
-
             self.kbasisslice[:,i]=self.kbasis[:,i_coeff,self.kslice[i,0],self.kslice[i,1],self.kslice[i,2]]# cut Gk get sigk
             # self.tbasisslice[i]=self.ut[l,(-traw-(1-self.taulimit[i]))%self.taunum+(1-self.taulimit[i])]*self.tsign[1-self.taulimit[i],-traw+self.taunum]
             # print(self.tfoldlist[1-self.taulimit[i],-self.t[i]+self.taunum])
@@ -325,6 +333,70 @@ class FuncNDiagNew:
         # print('fQ:',self.slicedG[0],self.slicedG[1],self.slicedG[2],self.slicedG[3],self.slicedG[4],self.slicedG[5])
         return result*self.diag_coefficient#-1 in the beginning means 1 loop
     
+    def update_ctqmc(self,new_momentum,new_imagtime,newsublatindshort,i_coeff,l):
+        '''
+        This function is the CTQMC version of the update function.
+        '''
+        newsublatind=gen_sublatint_full(newsublatindshort)
+        self.SubLatInd=newsublatind
+        for i in np.arange(self.nGf):
+            self.Gind[i]=newsublatind[i]+newsublatind[self.perm[i]]
+            self.ksym_array[i]=self.Gind[i]%2
+            
+            # Note: here kslice is related to self. since the k for sigma and cut GF are the same.
+            kraw=np.sum(self.depend[i,:self.Ndimk,None]*new_momentum,axis=0)
+            self.kslice[i]=kraw%self.knum
+            # Note: here tslice is related to self. but the traw define at (-beta,beta) belongs to self.
+            # since cut Gt will get sigma(-t), and taking correct limit is not that easy.
+            self.t[i]=np.sum(self.depend[i,self.Ndimk:]*new_imagtime.T)
+            # self.tslice[i]=self.tfoldlist[self.taulimit[i],self.t[i]+self.taunum]   
+            self.tslice[i]=self.t[i]%self.beta
+
+            # print(self.t[i],self.beta,self.t[i]//self.beta)
+            # print(self.tsignlist_ctqmc[(self.t[i]//self.beta).astype(int)+1])
+            self.tsign[i]=self.tsignlist_ctqmc[(self.t[i]//self.beta).astype(int)+1]
+            self.ksign[i]=self.ksignlist[np.sum(kraw//self.knum)]
+            # self.tsign[i]=self.tsignlist[self.taulimit[i],self.t[i]+self.taunum]
+            self.slicedG[i]=self.GF_spline_dict[self.Gind[i]](self.tslice[i])[self.kslice[i,0],self.kslice[i,1],self.kslice[i,2]]*self.tsign[i]
+
+
+
+            self.kbasisslice[:,i]=self.kbasis[:,i_coeff,self.kslice[i,0],self.kslice[i,1],self.kslice[i,2]]# cut Gk get sigk
+            # self.tbasisslice[i]=self.ut[l,(-traw-(1-self.taulimit[i]))%self.taunum+(1-self.taulimit[i])]*self.tsign[1-self.taulimit[i],-traw+self.taunum]
+            # print(self.tfoldlist[1-self.taulimit[i],-self.t[i]+self.taunum])
+            # self.tbasisslice[i]=self.ut[l,self.tfoldlist[1-self.taulimit[i],-self.t[i]+self.taunum] ]*self.tsignlist[1-self.taulimit[i],-self.t[i]+self.taunum]
+            # cutting G(t1-t2) gives sigma(t2-t1)
+            self.tbasisslice[i]=self.ut[l]((-self.t[i])%self.beta)*self.tsign[i]*(-1)# t1-t2 must have opposite sign as t2-t1.
+            if self.t[i]==0:
+                self.tbasisslice[i]*=self.taulimitfactor[i]
+
+            if self.Gind[i]==3:
+                self.slicedG[i]*=self.ksign[i]
+            self.kbasisslice[1,:]*=self.ksign
+                # but would this cancel the sign? 
+
+            # self.slicedG[i]=Gshift(self.GF[self.Gind[i]],self.kslice[i],self.tslice[i],self.ksym_array[i],self.knum,self.taunum,self.taulimit[i])
+        result= sumslices_fast(self.nGf,self.symfactor,self.slicedG,self.tbasisslice,self.kbasisslice[self.Gind%2,np.arange(self.nGf)])
+        # result=self.sum_allsigmas(self.slicedG,new_momentum,new_imagtime,newsublatind,i_coeff,l)
+        self.kslicetemp=copy.deepcopy(self.kslice)
+        self.ksign_temp=copy.deepcopy(self.ksign)
+        
+        self.tslicetemp=copy.deepcopy(self.tslice)
+        self.tsign_temp=copy.deepcopy(self.tsign)
+
+        self.kbasisslice_temp=copy.deepcopy(self.kbasisslice)
+        self.tbasisslice_temp=copy.deepcopy(self.tbasisslice)
+        # self.indbasisslice_temp=copy.deepcopy(self.indbasisslice)
+
+        self.slicedG_temp=copy.deepcopy(self.slicedG)
+        self.SubLatInd_temp=copy.deepcopy(self.SubLatInd)
+        self.ksym_arraytemp=copy.deepcopy(self.ksym_array)
+        self.Gind_temp=copy.deepcopy(self.Gind)
+        #note: beta/taunum means dtau.
+        # Note2: here the power of dtau is for all internal variables. However, using svd trick we also integrate out external tau.
+        # the reason of not count dtau for external tau is that svd basis u(tau) is normalized without dtau: \sum_i u^2_l(tau_i)=1. No dtau here.
+        # print('fQ:',self.slicedG[0],self.slicedG[1],self.slicedG[2],self.slicedG[3],self.slicedG[4],self.slicedG[5])
+        return result*self.diag_coefficient#-1 in the beginning means 1 loop 
     
     def update_temp(self,iloop,new_momentum,new_imagtime,newsublatindshort,i_coeff,l,globalflip=0):
         '''
@@ -493,6 +565,155 @@ class FuncNDiagNew:
             self.time_basist+=(time5-time4)
 
         return result*self.diag_coefficient
+
+
+
+    def update_temp_ctqmc(self,iloop,new_momentum,new_imagtime,newsublatindshort,i_coeff,l,globalflip=0):
+            '''
+            The idea of this fast evaluate function is that only update quantities when it's necessary.
+            first, every time we only update 1 of the variables. It could be k, tau, sublatind, or basis function indices i,j,l.
+            if we update.....
+            1. k. just evaluate the new k for relevant GFs and redo the slices.  have to retake the k basis.
+            2. tau. just evaluate the new tau for relevant GFs and redo the slices. have to retake the tau basis.
+            3. sublatind. do not have to slice k or tau again, but we take the element from another GF at the same k and tau point. have to retake the sublatind basis.
+            4. external variable. do not have to update the product of GFs. just re-evaluate the corresponded basis. 
+
+
+        '''
+            newsublatind=gen_sublatint_full(newsublatindshort)
+            # which variable is changed?
+            if iloop<self.Ndimk:# changing variable k 
+                time2=time.time()
+                # which GFs should be updated?
+                self.updatektau=self.depend[:,iloop]
+                indices=np.nonzero(self.updatektau)[0]
+                # vectorize
+                
+                # rawk=np.sum(self.depend[indices,:self.Ndimk,None]*new_momentum[None,:,:],axis=1)
+                rawk = np.dot(self.depend[indices, :self.Ndimk], new_momentum)
+                
+                self.kslicetemp[indices]=   rawk%self.knum       #self.kfold1D[rawk] 
+                
+                self.ksign_temp[indices]=self.ksignlist[np.sum(rawk//self.knum,axis=1)]
+                # self.ksign_temp[indices]=self.ksign3D[rawk[:,0],rawk[:,1],rawk[:,2]]
+                self.kbasisslice_temp[:,indices]=self.kbasis[:,i_coeff,self.kslicetemp[indices,0],self.kslicetemp[indices,1],self.kslicetemp[indices,2]]
+                timet=time.time()
+                for idx in indices:
+                    self.slicedG_temp[idx] = self.GF_spline_dict[self.Gind[idx]](self.tslice[idx])[
+                                                        self.kslicetemp[idx, 0],
+                                                        self.kslicetemp[idx, 1],
+                                                        self.kslicetemp[idx, 2]] * self.tsign[idx]  
+                timett=time.time()                      
+                gind3_indices = indices[self.Gind[indices] == 3]
+                self.slicedG_temp[gind3_indices] *= self.ksign_temp[gind3_indices]
+                self.kbasisslice_temp[1,indices] *= self.ksign_temp[indices]          
+
+                oddlGindsign=np.ones((self.nGf))
+                if l%2==1:
+                    oddlGindsign=self.Gindsignlist[self.Gind]
+                result=sumslices_fast(self.nGf,self.symfactor,self.slicedG_temp,self.tbasisslice*oddlGindsign,self.kbasisslice_temp[self.Gind%2])
+                
+                time3=time.time()
+                self.time_k+=(time3-time2)
+                self.time_test+=(timett-timet)
+            elif iloop< self.Ndimk+self.Ndimtau:# changing variable tau
+                time2=time.time()
+                self.updatektau=self.depend[:,iloop]
+                indices = np.nonzero(self.updatektau)[0]
+                # self.ttemp[indices] = np.sum(self.depend[indices, self.Ndimk:] * new_imagtime.T, axis=1)
+                self.ttemp[indices] = np.dot(self.depend[indices, self.Ndimk:], new_imagtime).T# the time directly from matrix prod
+                self.tslicetemp[indices]=self.ttemp[indices]%self.beta
+                # self.tslicetemp[indices] = self.tfoldlist[self.taulimit[indices], self.ttemp[indices] + self.taunum]# time folded in 0,beta. depend on if the GF is defined as 0+ or 0-.
+
+                self.tsign_temp[indices]=self.tsignlist_ctqmc[(self.ttemp[indices]//self.beta).astype(int)+1]
+                # self.tsign_temp[indices] = self.tsignlist[self.taulimit[indices], self.ttemp[indices] + self.taunum]# the extra sign because of folding back into 0,beta.
+                
+                kslice = self.kslice[indices]
+                tslicetemp = self.tslicetemp[indices]
+                Gind = self.Gind[indices]
+                slicedG_temp = np.array([
+                self.GF_spline_dict[Gind[i]](tslicetemp[i]) [kslice[i, 0], kslice[i, 1], kslice[i, 2]]for i in range(len(indices))])
+                self.slicedG_temp[indices] = slicedG_temp * self.tsign_temp[indices]# get the GF elements should be updated.
+
+                ksign_indices = Gind == 3
+                self.slicedG_temp[indices[ksign_indices]] *= self.ksign[indices[ksign_indices]]# extra sign due to folding back to 1BZ, if needed.
+
+                # tslice_for_sig = self.tfoldlist[self.taulimit_oppo[indices], -self.ttemp[indices] + self.taunum]
+                tslice_for_sig=(-1*self.ttemp[indices])%self.beta
+                # tsign_for_sig = self.tsignlist[self.taulimit_oppo[indices], -self.ttemp[indices] + self.taunum]
+                self.tbasisslice_temp[indices] = self.ut[l](tslice_for_sig) * self.tsign_temp[indices]*(-1)#when we cut G(t) we should multiply by u(-t)
+
+                # ttemp_zero_indices = self.ttemp[indices] == 0
+                #if there is a t=0, according to the definition we give 0+ or 0-. However we need both. 
+                # for tind in ttemp_zero_indices:# for all those has 0 times. if only have 0+ i should give 0-, vice versa.
+                
+                # self.tbasisslice_temp[indices[ttemp_zero_indices]] *= self.taulimitfactor[indices[ttemp_zero_indices]]
+                # print('tau update',new_imagtime.T)
+                # print(self.ttemp,'\n',self.tslicetemp,'\n',self.tsign_temp,'\n',indices,'\n',tslice_for_sig,'\n',self.tbasisslice_temp,'\n',self.slicedG_temp)
+
+                oddlGindsign=np.ones((self.nGf))
+                if l%2==1:
+                    oddlGindsign=self.Gindsignlist[self.Gind]# This uses particle-hole symmetry. G11 and G22 should have same coeff for even l but opposite sign for off ls.
+                result=sumslices_fast(self.nGf,self.symfactor,self.slicedG_temp,self.tbasisslice_temp*oddlGindsign,self.kbasisslice[self.Gind%2,np.arange(self.nGf)])#  self.kbasisslice[self.Gind%2]
+                time3=time.time()
+                self.time_tau+=(time3-time2)
+            elif iloop<self.Ndimk+self.Ndimtau+self.Ndimlat:# changing sublatind
+                time4=time.time()
+                shortind=iloop-self.Ndimk-self.Ndimtau
+                self.updateind=np.array([shortind*2,shortind*2+1,np.where(self.perm==shortind*2)[0][0],np.where(self.perm==shortind*2+1)[0][0]])
+                if globalflip==0:
+                    upd=self.updateind
+                elif globalflip==1:
+                    upd=np.arange(self.nGf)
+                # approach #2 this looks
+                for i in upd:# changing internal variable sublatind
+                    self.ksym_arraytemp[i]=(newsublatind[i]+newsublatind[self.perm[i]])%2# k space sym for new propagator. 
+                    self.Gind_temp[i]=newsublatind[i]+newsublatind[self.perm[i]]   
+                    self.slicedG_temp[i]=self.GF_spline_dict[self.Gind_temp[i]](self.tslice[i])[self.kslice[i,0],self.kslice[i,1],self.kslice[i,2]]*self.tsign[i]
+                    if self.Gind_temp[i]==3:
+                        self.slicedG_temp[i]*=self.ksign[i]  
+                oddlGindsign=np.ones((self.nGf))
+                if l%2==1:
+                    oddlGindsign=self.Gindsignlist[self.Gind_temp]
+                result=sumslices_fast(self.nGf,self.symfactor,self.slicedG_temp,self.tbasisslice*oddlGindsign,self.kbasisslice[self.Gind_temp%2])
+                time5=time.time()
+                self.time_sublatind+=(time5-time4)
+            elif iloop==self.Ndimk+self.Ndimtau+self.Ndimlat:# changing basis for k.
+                time4=time.time()
+                self.kbasisslice_temp=self.kbasis[:,i_coeff,self.kslice[:,0],self.kslice[:,1],self.kslice[:,2]]
+                gind3_indices = self.Gind == 3
+                self.kbasisslice_temp[1,:] *= self.ksign
+
+                oddlGindsign=np.ones((self.nGf))
+                if l%2==1:
+                    oddlGindsign=self.Gindsignlist[self.Gind]
+                result=sumslices_fast(self.nGf,self.symfactor,self.slicedG,self.tbasisslice*oddlGindsign,self.kbasisslice_temp[self.Gind%2])
+                time5=time.time()
+                self.time_basisk+=(time5-time4)
+            elif iloop==self.Ndimk+self.Ndimtau+self.Ndimlat+1:# changing basis for t.
+                time4=time.time()
+                # tslice_for_sig=self.tfoldlist[self.taulimit_oppo,-self.t+self.taunum]
+                # tsign_for_sig=self.tsignlist[self.taulimit_oppo,-self.t+self.taunum]
+                tslice_for_sig=(-1*self.t)%self.beta
+                tsign_for_sig=self.tsignlist_ctqmc[((-1*self.t)//self.beta).astype(int)+1]
+                self.tbasisslice_temp=self.ut[l](tslice_for_sig)*tsign_for_sig
+                # t_zero_indices = self.t == 0
+                # self.tbasisslice_temp[t_zero_indices] *= self.taulimitfactor[t_zero_indices]
+                oddlGindsign=np.ones((self.nGf))
+                if l%2==1:
+                    oddlGindsign=self.Gindsignlist[self.Gind]
+                result=sumslices_fast(self.nGf,self.symfactor,self.slicedG,self.tbasisslice_temp*oddlGindsign,self.kbasisslice[self.Gind%2,np.arange(self.nGf)])# self.kbasisslice[self.Gind%2]
+                time5=time.time()
+                self.time_basist+=(time5-time4)
+                # print('tbasis update',l,new_imagtime.T)
+                # print(self.t,'\n',self.tslice,'\n',self.tsign,'\n',tslice_for_sig,'\n',tsign_for_sig,'\n',self.tbasisslice_temp,'\n',self.slicedG)
+            return result*self.diag_coefficient
+
+
+
+
+
+
 
     def metropolis_accept(self,iloop,globalflip=0):
         if iloop<self.Ndimk:
@@ -666,7 +887,10 @@ def sumslices_fast(ngf,symfac,slices,utslices,kbasisslices):
             else:
                 mat[i, j] = slices[j]
     res=custom_prod(mat,ngf)
-    return np.sum(res*utslices*kbasisslices)/symfac
+    finalres=res*utslices*kbasisslices
+    # print(res.shape,utslices.shape,kbasisslices.shape,finalres.shape)
+    return finalres[0]# a test.
+    # return np.sum(res*utslices*kbasisslices)/symfac
 
 
     

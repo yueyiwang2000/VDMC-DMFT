@@ -138,6 +138,15 @@ def TrialStep1_tau(iloop,imagtime,taunum,Ndimk,taufold):
 
 
 @jit(nopython=True)
+def TrialStep1_tau_ctqmc(iloop,imagtime,Ndimk,beta):
+    # just return a random number between 0 and beta
+    dtau=np.random.rand()*beta*0.1
+    tau_new=np.mod(imagtime[iloop-Ndimk,:]+dtau,beta)
+    accept=1
+    return (tau_new, accept)
+
+
+@jit(nopython=True)
 def Trialstep0_l(lmax):
     lnew=np.random.randint(0,lmax)
     trial_ratio=1; trialaccept=1
@@ -156,6 +165,7 @@ def Give_new_tau(imagtime, tau_new, iloop,Ndimk):
     return timagtime
 
 
+# @jit(nopython=True)
 def readDMFT(dir): # read DMFT Sigma and G.
     # filename1='../files_variational/{}_{}_{}/Sig.out.{}'.format(B,U,T,index)
     # filename2='../files_variational/{}_{}_{}/Sig.OCA.{}'.format(B,U,T,index)

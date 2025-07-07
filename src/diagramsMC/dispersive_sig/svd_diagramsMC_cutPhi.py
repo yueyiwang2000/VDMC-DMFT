@@ -31,7 +31,8 @@ import fft_convolution as fft
 from ..diagramsMC_lib import *
 import diagramsMC.basis as basis
 import copy
-
+import tqdm
+# from svd_diagramsMC_cutPhi_ctqmc import IntegrateByMetropolis_ctqmc
 
 '''
 This code is MC estimation of self-energy diagrams using the trick of svd.
@@ -44,7 +45,7 @@ nprocs = comm.Get_size()
     
 class params:
     def __init__(self):
-        self.Nitt = 5000000   # number of MC steps in a single proc
+        self.Nitt = 500000   # number of MC steps in a single proc
         self.Ncout = 200000    # how often to print
         self.Nwarm = 1000     # warmup steps
         self.tmeassure = 10   # how often to meassure
@@ -52,29 +53,47 @@ class params:
         self.recomputew = 5e4/self.tmeassure # how often to check if V0 is correct
         self.per_recompute = 7 # how often to recompute fm auxiliary measuring function
 
+@jit(nopython=True)
 def geniloop(Ndimk,Ndimtau,Ndimlat):
     r = np.random.rand()
     iloop=0
-    if r<0.55:
+    if r<0.55:# change k
         iloop=np.random.randint(0,Ndimk)
     elif r<0.8:
-        iloop=Ndimk+np.random.randint(0,Ndimtau)
+        iloop=Ndimk+np.random.randint(0,Ndimtau)# change tau
     elif r<0.9:
-        iloop=Ndimk+Ndimlat+np.random.randint(0,Ndimtau)
+        iloop=Ndimk+Ndimlat+np.random.randint(0,Ndimtau)# change sublatind
     elif r<0.95:
-        iloop=Ndimk+Ndimlat+Ndimtau
+        iloop=Ndimk+Ndimlat+Ndimtau# change i, the k basis
     else:
-        iloop=Ndimk+Ndimlat+Ndimtau+1
+        iloop=Ndimk+Ndimlat+Ndimtau+1# change l, the time basis
+    return iloop
+
+def geniloop_test(Ndimk,Ndimtau,Ndimlat):
+    r = np.random.rand()
+    iloop=0
+    # if r<0.55:# change k
+        # iloop=np.random.randint(0,Ndimk)
+    if r<0.8:
+        iloop=Ndimk+np.random.randint(0,Ndimtau)# change tau
+    # elif r<0.9:
+    #     iloop=Ndimk+Ndimlat+np.random.randint(0,Ndimtau)# change sublatind
+    # elif r<0.95:
+    #     iloop=Ndimk+Ndimlat+Ndimtau# change i, the k basis
+    else:
+        iloop=Ndimk+Ndimlat+Ndimtau+1# change l, the time basis
     return iloop
 
 
 def get_gtau(U,T):
     beta=1/T
     mu=U/2
-    name1='../files_boldc/{}_{}/Sig.out'.format(U,T)
+    name1='../data/files_boldc/{}_{}/Sig.out'.format(U,T)
     filename1=readDMFT(name1)
-    name2='../files_ctqmc/{}_{}/Sig.out'.format(U,T)
+    name2='../data/files_ctqmc/{}_{}/Sig.out'.format(U,T)
     filename2=readDMFT(name2)
+    name3='../data/files_boldc/{}_{}/Sig.OCA'.format(U,T)
+    filename3=readDMFT(name3)
     # print(filename1)
     # print(filename2)
     if (os.path.exists(filename1)):
@@ -82,6 +101,8 @@ def get_gtau(U,T):
     elif (os.path.exists(filename2)):
         filename=filename2
         # print('reading DMFT data from {}'.format(filename))
+    elif (os.path.exists(filename3)):
+        filename=filename3
     else:
         print('{} cannot be found!'.format(filename))  
         return 0  
@@ -114,7 +135,193 @@ def get_gtau(U,T):
     # Gloc22=np.sum(G22_tau,axis=(1,2,3))/knum**3
     return G11_tau.real,G12_tau.real,G22_tau.real,Gloc11_tau.real,Gloc22_tau.real
 
-def IntegrateByMetropolis_svd(func, qx, p,seed,lmax,imax,iflocal=0):
+
+
+def IntegrateByMetropolis_ctqmc(func,qx,p,seed,lmax,imax,iflocal=0):
+    '''
+    This function is the CTQMC version of the IntegrateByMetropolis_ctqmc.py code, which overcomes some problems.
+    Also, this code should work under doped regime.
+    '''
+    ifprint=0
+    #-------basic settings-----
+    # time check
+    time_trial=0
+    time_evaluate=0
+    time_accrej=0
+    time_others=0
+    Nacc,Nrej,Nall=0,0,0
+    time_begin=time.time()
+    ifrecomp=1
+    np.random.seed(seed)# use the given seed
+    # random.seed(0)         # make sure that we always get the same sequence of steps. If parallel. they should have different seeds.
+    knum=func.knum
+    taunum=func.taunum
+    taufold=np.arange(func.taunum+2)
+    taufold[-1]=func.taunum-1
+    taufold[func.taunum]=0
+    kfold=np.arange(func.knum+2)
+    kfold[-1]=func.knum-1
+    kfold[func.knum]=0
+    # Pnorm2 = np.zeros_like(qx)  # Final results V_physical is stored in Pval
+    
+    Pnorm = 0.0            # V_alternative is stored in Pnorm
+    Pval_sum = 0.0         # this is widetilde{V_physical}
+    Pnorm_sum = 0.0        # this is widetilde{V_alternative}
+    V0norm = p.V0norm      # this is V0
+    Vphys=0
+    dk_hist = 1.0          # we are creating histogram by adding each configuration with weight 1.
+    # note: here i have both k and tau as external variable.
+    Ndimk = func.Ndimk       # dimensions of the problem
+    Ndimtau=func.Ndimtau
+    Ndimlat=func.Ndimlat
+    Pval=np.zeros_like(qx)
+    inc_recompute = (p.per_recompute+0.52)/p.per_recompute # How often to self-consistently recompute
+    # the wight functions g_i and h_{ij}.
+    kbasisindlist=basis.gen_basisindlist(imax)
+    maxbasis=10# reject all attempts of n1+n2+n3+l>10
+
+
+
+    momentum=np.random.randint(low=0, high=knum, size=(Ndimk,3))
+    momentum=np.zeros_like(momentum)# local test
+    # imagtime=np.random.randint(low=0, high=taunum, size=(Ndimtau,1))
+    imagtime=np.random.rand(Ndimtau,1)*func.beta# continuous time
+    sublatind=np.random.randint(low=1,high=3,size=(Ndimlat))# indices for each time point. 
+    sublatind=np.ones_like(sublatind)# fix the sublatind to be all 1 to test diagonal ones.
+    l=0#np.random.randint(0,lmax)# generate the external variable
+    i_coeff=np.random.randint(0,func.kbasisnum)# this is the index for kspace basis.
+    # if iflocal:
+    i_coeff=0
+    sublatind=np.ones_like(sublatind)
+    ti_coeff=i_coeff
+    tl=l
+    tmomentum=copy.deepcopy(momentum)
+    timagtime=copy.deepcopy(imagtime)
+    tsublatind=copy.deepcopy(sublatind)
+
+    # myweight = svd_weight_lib_cutPhi.meassureWeight(Ndimk, Ndimtau,knum,taunum,Ndimlat)
+    # to be updated. add sublatint in the update function.
+    print('initialization: momentum=\n',momentum,'\n imagtime=',imagtime.T,'\n sublatind=',sublatind,'\n i_coeff=',i_coeff,'\n l=',l)
+    fQ = func.update_ctqmc(momentum,imagtime,sublatind,i_coeff,l)#, V0norm * myweight( momentum,imagtime,sublatind-1 ) # fQ=(f(X), V0*f_m(X)) sublatind consists 1 and 2 but we'd better start from 0.
+    # print('starting with f=', fQ, '\nstarting momenta=', momentum,'\n starting time=',imagtime)
+
+    Nmeassure = 0  # How many measurements we had?
+    Nall_l,Nacc_l,Nall_i,Nacc_i,Nall_ind,Nacc_ind, Nall_k, Nall_t, Nacc_t, Nacc_k = 0, 0, 0, 0, 0,0,0,0,0,0
+    c_recompute = 0 # when to recompute the auxiliary function?
+    for itt in range(p.Nitt):   # long loop
+        time0=time.time()
+        # variables: k,tau,sublatind, i_coeff,l_coeff
+        # iloop = int( (Ndimk+Ndimtau+Ndimlat+2) * random.rand() )   # which variable to change, iloop=0 changes external r_0
+        iloop=geniloop_test(Ndimk,Ndimtau,Ndimlat)
+        accept = False
+        if (iloop >= 0) and (iloop < Ndimk):# changing internal variable k
+            Nall_k += 1
+            (K_new,  trialaccept) = TrialStep1_k(iloop,momentum,knum,kfold)
+            print('k updated!')
+            # if iflocal:
+            #     trialaccept=0
+        elif (iloop >= Ndimk) and (iloop < Ndimk+Ndimtau):# changing internal variable tau
+            # (tau_new, trialaccept)=TrialStep1_tau(iloop,imagtime,taunum,Ndimk,taufold)
+            (tau_new, trialaccept)=TrialStep1_tau_ctqmc(iloop,imagtime,Ndimk,func.beta)
+            Nall_t+=1
+        elif (iloop >= Ndimk+Ndimtau) and (iloop < Ndimk+Ndimtau+Ndimlat):# changing sublatint. does not matter in or external variable.
+            sublatind_new=3-sublatind[iloop-Ndimk-Ndimtau]#np.random.randint(2)+1#
+            trialaccept=1
+            Nall_ind+=1
+            if iflocal:
+                trialaccept=0
+            print('sublatind updated!')
+        elif (iloop==Ndimk+Ndimtau+Ndimlat):# changing external variable i
+            i_coeffnew=np.random.randint(0,func.kbasisnum)
+            Nall_i+=1
+            trialaccept=1
+            print('i updated!')
+            # if np.sum(kbasisindlist[i_coeffnew])*2+l<=maxbasis:
+            #     trialaccept=0
+        elif (iloop == Ndimk+Ndimtau+Ndimlat+1): # changing external variable l
+            # lnew=np.random.randint(0,lmax)
+            # trial_ratio=1; trialaccept=1
+            (lnew, trialaccept)=Trialstep0_l(lmax)
+            Nall_l+=1
+            # if np.sum(kbasisindlist[i_coeff])*2+lnew<=maxbasis:
+            #     trialaccept=0
+
+        time1=time.time()
+        time_trial+=(time1-time0)
+        if (trialaccept): # trial step successful. We did not yet accept, just the trial step.
+            if (iloop<Ndimk):# k is changed
+                tmomentum= Give_new_K(momentum, K_new, iloop)
+            elif (iloop<Ndimk+Ndimtau):# tau is changed
+                timagtime=Give_new_tau(imagtime, tau_new, iloop,Ndimk)
+            elif (iloop<Ndimk+Ndimtau+Ndimlat):
+                tsublatind[iloop-Ndimk-Ndimtau]=sublatind_new 
+            elif (iloop==Ndimk+Ndimtau+Ndimlat):# i is changed
+                ti_coeff=i_coeffnew         
+            elif (iloop==Ndimk+Ndimtau+Ndimlat+1):# l is changed
+                tl=np.copy(lnew)
+ 
+
+            time_beforecalc=time.time()
+
+            fQ_new = func.update_temp_ctqmc(iloop,tmomentum,timagtime,tsublatind,ti_coeff,tl)#, V0norm * myweight(tmomentum,timagtime,tsublatind-1) # f_new
+            time_aftercalc=time.time()
+            time_evaluate+=(time_aftercalc-time_beforecalc)
+            # ratio = (abs(fQ_new[0])+fQ_new[1])/(abs(fQ[0])+fQ[1]) 
+            ratio=abs(fQ_new)/abs(fQ)
+            # print('ratio=',ratio)
+
+            accept = abs(ratio) > 1-random.rand() # Metropolis
+            if accept: # the step succeeded
+                func.metropolis_accept(iloop)
+                if (iloop<Ndimk):
+                    momentum[iloop] = K_new
+                    Nacc_k += 1
+                elif iloop<Ndimk+Ndimtau:
+                    imagtime[iloop-Ndimk]=tau_new
+                    Nacc_t += 1
+                elif iloop<Ndimk+Ndimtau+Ndimlat:
+                    sublatind[iloop-Ndimk-Ndimtau]=tsublatind[iloop-Ndimk-Ndimtau]
+                    Nacc_ind+=1
+                elif (iloop==Ndimk+Ndimtau+Ndimlat):
+                    i_coeff=ti_coeff
+                    Nacc_i+=1
+                elif (iloop==Ndimk+Ndimtau+Ndimlat+1):
+                    l=np.copy(tl)
+                    Nacc_l+=1
+                fQ = fQ_new
+                Nacc+=1
+                # print('metropolis accepted! iloop=',iloop,'\n')
+            else:
+                Nrej+=1
+                time0=time.time()
+                if (iloop<Ndimk):
+                    tmomentum[iloop] = momentum[iloop]
+                elif iloop<Ndimk+Ndimtau:
+                    timagtime[iloop-Ndimk]=imagtime[iloop-Ndimk]
+                elif iloop<Ndimk+Ndimtau+Ndimlat:
+                    tsublatind[iloop-Ndimk-Ndimtau]=sublatind[iloop-Ndimk-Ndimtau]
+                    # print('accept trialsublatind. new sublatind=',sublatind)
+                elif (iloop==Ndimk+Ndimtau+Ndimlat):
+                    ti_coeff=i_coeff
+                elif (iloop==Ndimk+Ndimtau+Ndimlat+1):
+                    tl=l
+                    
+                func.metropolis_reject(iloop)
+                # print('metropolis rejected! iloop=',iloop,'\n')
+        if (itt >= p.Nwarm and itt % p.tmeassure==0 and trialaccept==1): # below is measuring every p.tmeassure stepsand trialaccept==1
+            Nmeassure += 1   # new meassurements
+            Pval[l,i_coeff]+=np.sign(fQ)
+            Vphys+=1/fQ
+        if itt%(p.Nitt/10)==0:
+            print('itt=',itt, 'Nacc=',Nacc, 'Nrej=',Nrej, 'Nall=',Nall)
+            # myweight.Add_to_K_histogram(dk_hist*Wphs, momentum,imagtime,sublatind-1)
+    Pval *=  (2*lmax*func.kbasisnum) #  Finally, the integral is I = V0 *V_physical/V_alternative.
+    return Pval.real
+
+
+
+# @jit(nopython=True)
+def IntegrateByMetropolis_svd(func, qx, p,seed,lmax,imax,iflocal=1):
     """ Integration by Metropolis:
           func(momentum)   -- function to integrate
           qx               -- mesh given by a user
@@ -241,6 +448,7 @@ def IntegrateByMetropolis_svd(func, qx, p,seed,lmax,imax,iflocal=0):
             time_evaluate+=(time_aftercalc-time_beforecalc)
             ratio = (abs(fQ_new[0])+fQ_new[1])/(abs(fQ[0])+fQ[1]) 
             # print('ratio=',ratio)
+
             accept = abs(ratio) > 1-random.rand() # Metropolis
             if accept: # the step succeeded
                 func.metropolis_accept(iloop)
@@ -404,14 +612,15 @@ def IntegrateByMetropolis_svd(func, qx, p,seed,lmax,imax,iflocal=0):
         # print('Pnorm',Pnorm)
         # print('Pnorm2 ave',np.mean(Pnorm2))
         # print('Pnorm2 sum',np.sum(Pnorm2))
-    # print('time of rank {}: total={:.3f}s, trial={:.3f}s, evaluate={:.3f}s, accrej={:.3f}s, others={:.3f}s'.format(rank, time_ttl,time_trial,time_evaluate,time_accrej,time_others))
+    print('time of rank {}: total={:.3f}s, trial={:.3f}s, evaluate={:.3f}s, accrej={:.3f}s, others={:.3f}s'.format(rank, time_ttl,time_trial,time_evaluate,time_accrej,time_others))
     return (Pval.real,myweight)
 
 
-def Integratesvd_Parallel(func,qx,p,imax,lmax,ut,kbasis,sublatbasis):
+def Integratesvd_Parallel(func,qx,p,imax,lmax):
     seed = np.random.randint(0, 10000) + rank*29
     # seed=0
-    (Pval,myweight)=IntegrateByMetropolis_svd(func, qx, p,seed,lmax,imax,0)# choose different seeds for different proc.
+    # (Pval,myweight)=IntegrateByMetropolis_svd(func, qx, p,seed,lmax,imax,0)# choose different seeds for different proc.
+    Pval=IntegrateByMetropolis_ctqmc(func, qx, p,seed,lmax,imax,0)
     Pval = np.ascontiguousarray(Pval)
     # comm.barrier()
     # print('rank={},Pval={}'.format(rank,Pval[0,0,0]))
@@ -453,13 +662,14 @@ def Pval_process(Pval,beta,kbasis,ut,alpha=0.1,l123max=10,ifplot=0):
     lmax=np.shape(ut)[0]
     basisindnum=np.shape(kbasis)[1]
     basisind=basis.gen_basisindlist(imax)
-    ab_pts11=int(0.02*taunum)
-    ab_pts12=int(0.05*taunum)
+    ab_pts11=int(0.0*taunum)
+    ab_pts12=int(0.0*taunum)
     taulist=(np.arange(taunum+1))/taunum*beta
     # print(np.shape(taulist),np.shape(Sig11tau))
-    interpolator_11 = interp1d(taulist[ab_pts11:-ab_pts11], Sig11tauold[ab_pts11:-ab_pts11,:,:,:], kind='quadratic', axis=0, fill_value='extrapolate')
-    interpolator_12 = interp1d(taulist[ab_pts12:-ab_pts12], Sig12tauold[ab_pts12:-ab_pts12,:,:,:], kind='quadratic', axis=0, fill_value='extrapolate')
-
+    # interpolator_11 = interp1d(taulist[ab_pts11:-ab_pts11], Sig11tauold[ab_pts11:-ab_pts11,:,:,:], kind='quadratic', axis=0, fill_value='extrapolate')
+    # interpolator_12 = interp1d(taulist[ab_pts12:-ab_pts12], Sig12tauold[ab_pts12:-ab_pts12,:,:,:], kind='quadratic', axis=0, fill_value='extrapolate')
+    interpolator_11 = interp1d(taulist, Sig11tauold,  axis=0, fill_value='extrapolate')
+    interpolator_12 = interp1d(taulist, Sig12tauold,  axis=0, fill_value='extrapolate') 
     Sig11tau=interpolator_11(taulist)
     Sig12tau=interpolator_12(taulist)
     # plt.plot(np.sum(Sig11tauold,axis=(1,2,3)),label='11tauold ave')
@@ -511,8 +721,8 @@ def MC_test(U,T,nfreq,knum):
     mu=U/2
     beta=1/T
     # taunum=nfreq*2
-    taunum=100
-    lmax=8# number of svd coefficient.
+    taunum=10000
+    lmax=15# number of svd coefficient.
     imax=4
     G11_tau,G12_tau,G22_tau,Gloc11_tau,Gloc22_tau=get_gtau(U,T)
 
@@ -526,19 +736,31 @@ def MC_test(U,T,nfreq,knum):
     # sigma2=sig2(G11_tau,G12_tau,G22_tau,knum,nfreq,U,beta)
     # sigma2off=sig2offdiag(G11_tau,G12_tau,G22_tau,knum,nfreq,U,beta)
     # sigma2loc=sig2(Gloc11_tau,G12_tau,Gloc22_tau,knum,nfreq,U,beta)
-    sig4_1_11,sig4_1_12=allsig4_1(G11_tau,G12_tau,G22_tau,knum,nfreq,U,beta)
-    sig4_2_11,sig4_2_12=allsig4_2(G11_tau,G12_tau,G22_tau,knum,nfreq,U,beta)
-    sig3_1_11,sig3_1_12=allsig3_1(G11_tau,G12_tau,G22_tau,knum,nfreq,U,beta)
-    sig3_2_11,sig3_2_12=allsig3_2(G11_tau,G12_tau,G22_tau,knum,nfreq,U,beta)
+    Gloc12_tau=np.zeros_like(Gloc11_tau)
+
+    sig4_2_11,sig4_2_12=allsig4_2(Gloc11_tau,Gloc12_tau,Gloc22_tau,knum,nfreq,U,beta)
+
+    # sig4_1_11,sig4_1_12=allsig4_1(G11_tau,G12_tau,G22_tau,knum,nfreq,U,beta)
+    # sig4_2_11,sig4_2_12=allsig4_2(G11_tau,G12_tau,G22_tau,knum,nfreq,U,beta)
+    # sig3_1_11,sig3_1_12=allsig3_1(G11_tau,G12_tau,G22_tau,knum,nfreq,U,beta)
+    # sig3_2_11,sig3_2_12=allsig3_2(G11_tau,G12_tau,G22_tau,knum,nfreq,U,beta)
     # G12_tau=np.zeros_like(G12_tau)
 
-    GFs=(G11_tau,G12_tau,G22_tau)
-
+    # GFs=(G11_tau,G12_tau,G22_tau)
+    GFs=(Gloc11_tau,Gloc12_tau,Gloc22_tau)
+    #plot GFs
+    # plt.figure(figsize=(10, 5))
+    # plt.plot(Gloc11_tau[:,0,0,0],label='Gloc11')
+    # plt.plot(Gloc12_tau[:,0,0,0],label='Gloc12')
+    # plt.plot(Gloc22_tau[:,0,0,0],label='Gloc22')
+    # plt.legend()
+    # plt.show()
 
     # generate basis of tau, k sublatind.
     # tau basis
     # note about parallel svd: sigular matrix u and v are not unique, there is a gauge freedom. So it is important to do svd in 1 proc and then broadcast.
-    taulist=(np.arange(taunum+1))/taunum*beta#
+    # taulist=(np.arange(taunum+1))/taunum*beta#
+    taulist=basis.nonuniform_taumesh(taunum,beta,opt='chebyshev')
     omlist=(2*np.arange(2*nfreq)+1-2*nfreq)*np.pi/beta 
     ker=basis.fermi_kernel(taulist,omlist,beta)
     # only do svd in rank0, than broadcast
@@ -547,8 +769,20 @@ def MC_test(U,T,nfreq,knum):
         ut,sig,v=basis.svd_kernel_fast(ker,lmax)
         # if diag this is all coeffs. if offdiag, we only need 1st, 3rd, 5th,...
         print('sigular values:',sig)
+        #plot all uts
+        plt.figure(figsize=(10, 5))
+        # for i in range(lmax):
+        #     plt.plot(ut[i], label=f"Basis Function {i+1}")
+        #     plt.legend()
+        #     plt.show()
     ut = np.ascontiguousarray(ut)
     comm.Bcast(ut, root=0)
+    #spline ut for ctqmc using interp1d for each ut
+    ut_spline=[]
+    for i in range(lmax):
+        ut_spline.append(interp1d(taulist,ut[i],axis=0,fill_value='extrapolate'))
+    ut_spline=np.array(ut_spline)
+
     basisnum=basis.gen_basisnum(imax)
     # kbasis
     kbasis=np.empty((2,basisnum,knum,knum,knum),dtype=float)
@@ -603,16 +837,17 @@ def MC_test(U,T,nfreq,knum):
                     [0,1,0,1,0,0,-1,1],
                     [1,0,0,0,0,-1,0,0],
                     [0,1,0,0,1,-1,1,0]])   
-    fun=diag_def_cutPhifast.FuncNDiagNew(T,U,knum,taunum,nfreq,4,ut,kbasis,perm42,GFs,dep42,8)# sig3_2_111
+    # fun=diag_def_cutPhifast.FuncNDiagNew(T,U,knum,taunum,nfreq,4,ut,kbasis,perm42,GFs,dep42,8)# sig3_2_111
+    fun=diag_def_cutPhifast.FuncNDiagNew(T,U,knum,taunum,nfreq,4,ut_spline,kbasis,perm42,GFs,dep42,8)# sig3_2_111. for ctqmc
     # fun=diag_def_cutPhifast.FuncNDiagNew(T,U,knum,taunum,nfreq,4,ut,kbasis, sublatind_basis,perm42,GFs,dep42,8)# sig3_2_111
     # fun1=diag_def_new240706.FuncNDiagNew(T,U,knum,taunum,nfreq,3,ut,perm31,GFs,dep31,4)
     qx=np.zeros((lmax,fun.kbasisnum),dtype=float)# first dimension means 11 12 21 22, and then svd basis u_l, then kspace basis m_i
     # qx=np.zeros(taunum)
     # (Pval_raw,myweight)=IntegrateByMetropolis_svd(fun, qx, p,0,lmax,ut,1)#serial test (func, qx, p,seed,lmax,ut,ifprint=1)
-    Pval_raw=Integratesvd_Parallel(fun,qx,p,imax,lmax,ut,kbasis,sublatind_basis)#parallel test
+    Pval_raw=Integratesvd_Parallel(fun,qx,p,imax,lmax)#parallel test
     
     if rank==0:
-        Pval_raw=Pval_process(Pval_raw,beta,kbasis,ut)
+        # Pval_raw=Pval_process(Pval_raw,beta,kbasis,ut)
         clk11_raw=basis.restore_clk(Pval_raw,kbasis[0])
         clk12_raw=basis.restore_clk(Pval_raw,kbasis[1])
         Pval11=clk11_raw
@@ -738,7 +973,7 @@ def Summon_Integrate_Parallel_dispersive(func,p,imax,lmax,ut,kbasis,beta,alpha=0
     # Sig22_iom=np.zeros((2*nfreq,knum,knum,knum),dtype=complex)
 
     if rank==0:
-        Pval=Pval_process(Pval,beta,kbasis,ut,alpha)
+        # Pval=Pval_process(Pval,beta,kbasis,ut,alpha)
         if svdcheck==1:
         
             basisind=basis.gen_basisindlist(imax)
@@ -783,8 +1018,8 @@ def Summon_Integrate_Parallel_dispersive(func,p,imax,lmax,ut,kbasis,beta,alpha=0
     return Pval11,Pval12,Sig11_iom,Sig12_iom,Sig11tau,Sig12tau
 
 if __name__ == "__main__":
-    U=10.
-    T=0.3
+    U=4.0
+    T=0.2
     knum=10
     nfreq=500
     MC_test(U,T,nfreq,knum)

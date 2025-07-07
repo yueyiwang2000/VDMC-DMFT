@@ -19,15 +19,83 @@ sys.path.append('./')
 from .diagramsMC_lib import *
 import perturb_lib as lib
 import fft_convolution as fft
-
+from scipy.special import roots_legendre
+from numpy.polynomial.legendre import Legendre
 
 '''
 A more efficient way to do the integration, using a efficient basis to express the self-energy.
 And through this, generating self-energy diagrams from cutting phi diagram can be done in a more efficient way.
 '''
+def tau_gauss_legendre(N, beta):
+    """
+    Gauss–Legendre 节点映射到 [0, β]
+    """
+    x, _ = roots_legendre(N)
+    return 0.5 * beta * (x + 1)
 
+def tau_gauss_lobatto(N, beta):
+    """
+    Gauss–Lobatto–Legendre 节点（含端点）映射到 [0, β]
+    """
+    if N < 2:
+        raise ValueError("N must be >= 2 for Gauss-Lobatto")
+    P = Legendre.basis(N - 1)
+    x_int = P.deriv().roots()  # P_{N-1}' 的根
+    x = np.concatenate(([-1.0], x_int, [1.0]))
+    x.sort()
+    return 0.5 * beta * (x + 1)
+
+def tau_logistic(N, beta, p=2):
+    """
+    对称 Logistic 映射：端点聚集，可调节 p 参数
+    """
+    u = np.linspace(0, 1, N)
+    return beta * (u**p / (u**p + (1 - u)**p))
+
+def tau_tanh_sinh(N, beta, lam=1.0, Y=5.0):
+    """
+    双指数 (tanh–sinh) 变换：极端端点聚集
+    """
+    y = np.linspace(-Y, Y, N)
+    return 0.5 * beta * (1 + np.tanh(lam * y))
+
+def fermi_kernel(t, w, beta):
+    t = np.asarray(t)
+    w = np.asarray(w)
+
+    x = beta * w / 2.0
+    y = 2.0 * t / beta - 1.0
+
+    result = np.zeros((t.size, w.size))
+
+    mask_large_x = x > 100
+    mask_small_x = x < -100
+    mask_mid_x = ~mask_large_x & ~mask_small_x
+    # print(mask_large_x,mask_mid_x,mask_small_x)
+    result[:,mask_large_x] = np.exp(-x[None,mask_large_x] * (y[:,None] + 1.0))
+    result[:,mask_small_x] = np.exp(x[None,mask_small_x] * (1.0 - y[:,None]))
+    result[:,mask_mid_x] = np.exp(-x[None,mask_mid_x] * y[:,None]) / (2.0 * np.cosh(x[None,mask_mid_x]))
+
+    return result
 
 #-----------useful functions of tau basis----------
+
+def nonuniform_taumesh(N_tau_nu,beta,opt='chebyshev'):
+    if opt=='chebyshev':
+        j = np.arange(N_tau_nu)
+        tau_nonuni = 0.5 * beta * (1 + np.cos((2*j + 1) / (2 * N_tau_nu) * np.pi))
+    elif opt=='gauss_legendre':
+        tau_nonuni = tau_gauss_legendre(N_tau_nu, beta)
+    elif opt=='gauss_lobatto':
+        tau_nonuni = tau_gauss_lobatto(N_tau_nu, beta)
+    elif opt=='logistic':
+        tau_nonuni = tau_logistic(N_tau_nu, beta)
+    elif opt=='tanh_sinh':
+        tau_nonuni = tau_tanh_sinh(N_tau_nu, beta)
+    return tau_nonuni
+
+
+
 
 def fermi_kernel(t, w, beta):
     t = np.asarray(t)
