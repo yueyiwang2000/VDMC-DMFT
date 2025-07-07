@@ -29,6 +29,7 @@ project_root/
     ├── Sigma_disp1/          # self-energy calculated from perturbation
     ├── Sigma_dispB/          # self-energy calculated from perturbation, under a small magnetic field (to calculate the X_AF)
     ├── Sigma_imp/            # DMFT counter terms in perturbation
+    ├── files_finitesize/     # finite size analysis data
 │── .gitignore      
 │── README.md 
 
